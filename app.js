@@ -31,7 +31,6 @@ const TRACKS = [
   { g: '截面', id: 'gamma', label: '扭转角 γ°', min: 0, max: 360, step: 1, def: 0 },
   { g: '截面', id: 'hRatio', label: '截距位置', min: 0, max: 1, step: 0.01, def: 0.5 },
   { g: '截面', id: 'psize', label: '截面尺寸', min: 3, max: 14, step: 0.2, def: 8 },
-  { g: '线条', id: 'lineWidth', label: '线宽', min: 0.03, max: 0.5, step: 0.005, def: 0.12 },
   { g: '显示', id: 'showCone', label: '圆锥曲面', min: 0, max: 1, step: 1, def: 1, integer: true, seg: ['隐藏', '显示'] },
   { g: '显示', id: 'coneWire', label: '圆锥线框', min: 0, max: 1, step: 1, def: 1, integer: true, seg: ['隐藏', '显示'] },
   { g: '显示', id: 'showPlane', label: '截面平面', min: 0, max: 1, step: 1, def: 1, integer: true, seg: ['隐藏', '显示'] },
@@ -69,7 +68,6 @@ function seedDemo() {
   K('phi', [[0, 0, 'linear'], [3, 30, 'linear'], [6, 60, 'linear'], [9, 77, 'linear'], [12, 0, 'linear']]);
   K('hRatio', [[0, 0.5], [6, 0.34], [12, 0.5]]);
   K('gamma', [[0, 0], [12, 130]]);
-  K('lineWidth', [[0, 0.12], [6, 0.22], [12, 0.12]]);
   K('fov', [[0, 45], [6, 40], [12, 45]]);
 }
 seedDemo();
@@ -132,91 +130,6 @@ function disposeGroup(g) {
   }
 }
 
-// 轻量管状几何：沿折线生成管道（平行传输法线，避免 Frenet 翻转）
-function buildTube(points, radius, radialSeg = 6) {
-  const n = points.length;
-  if (n < 2 || radius <= 0) return null;
-  const tangents = [];
-  for (let i = 0; i < n; i++) {
-    const t = points[Math.min(n - 1, i + 1)].clone().sub(points[Math.max(0, i - 1)]);
-    if (t.lengthSq() < 1e-14) t.set(0, 1, 0);
-    tangents.push(t.normalize());
-  }
-  const ref = Math.abs(tangents[0].y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
-  const frames = [];
-  let prevN = new THREE.Vector3().crossVectors(tangents[0], ref);
-  if (prevN.lengthSq() < 1e-8) prevN.crossVectors(tangents[0], new THREE.Vector3(0, 0, 1));
-  prevN.normalize();
-  for (let i = 0; i < n; i++) {
-    const t = tangents[i];
-    let nrm;
-    if (i === 0) nrm = prevN.clone();
-    else {
-      const pt = tangents[i - 1];
-      nrm = prevN.clone();
-      const rot = new THREE.Vector3().crossVectors(pt, t);
-      const len = rot.length();
-      if (len > 1e-10) nrm.applyAxisAngle(rot.multiplyScalar(1 / len), Math.atan2(len, Math.max(-1, Math.min(1, pt.dot(t)))));
-    }
-    const bin = new THREE.Vector3().crossVectors(t, nrm).normalize();
-    nrm.crossVectors(bin, t).normalize();
-    frames.push({ nrm, bin });
-    prevN.copy(nrm);
-  }
-  const pos = [];
-  for (let i = 0; i < n; i++) {
-    const { nrm, bin } = frames[i];
-    const p = points[i];
-    for (let j = 0; j < radialSeg; j++) {
-      const a = j / radialSeg * Math.PI * 2;
-      const c = Math.cos(a), s = Math.sin(a);
-      pos.push(p.x + (nrm.x * c + bin.x * s) * radius,
-               p.y + (nrm.y * c + bin.y * s) * radius,
-               p.z + (nrm.z * c + bin.z * s) * radius);
-    }
-  }
-  const idx = [];
-  for (let i = 0; i < n - 1; i++) {
-    for (let j = 0; j < radialSeg; j++) {
-      const a = i * radialSeg + j;
-      const b = i * radialSeg + (j + 1) % radialSeg;
-      const c = (i + 1) * radialSeg + j;
-      const d = (i + 1) * radialSeg + (j + 1) % radialSeg;
-      idx.push(a, c, b, b, c, d);
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geo.setIndex(idx);
-  geo.computeVertexNormals();
-  return geo;
-}
-
-// 发光管状线：亮芯(纯色) + 外层 additive 光晕 → 任意粗细、醒目发光
-function addGlowLine(group, points, color, radius, opts = {}) {
-  const { coreOpacity = 0.95, haloOpacity = 0.32, haloScale = 2.1, radialSeg = 6 } = opts;
-  if (points.length < 2) return;
-  const coreGeo = buildTube(points, radius, radialSeg);
-  if (!coreGeo) return;
-  group.add(new THREE.Mesh(coreGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: coreOpacity })));
-  const haloGeo = buildTube(points, radius * haloScale, radialSeg);
-  group.add(new THREE.Mesh(haloGeo, new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: haloOpacity,
-    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-  })));
-}
-// 发光球（焦点等点位标记）
-function addGlowSphere(group, pos, color, r) {
-  const core = new THREE.Mesh(new THREE.SphereGeometry(r, 12, 12), new THREE.MeshBasicMaterial({ color }));
-  core.position.copy(pos);
-  group.add(core);
-  const halo = new THREE.Mesh(new THREE.SphereGeometry(r * 1.8, 12, 12), new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false,
-  }));
-  halo.position.copy(pos);
-  group.add(halo);
-}
-
 // 平面基向量：法线 n=(sinφcosγ, cosφ, sinφsinγ)，过点 P0=(0,hAbs,0)，n·p = hAbs·cosφ
 function planeBasis(alphaDeg, phiDeg, gammaDeg, hAbs) {
   const a = alphaDeg * Math.PI / 180;
@@ -234,7 +147,7 @@ function planeBasis(alphaDeg, phiDeg, gammaDeg, hAbs) {
 }
 
 // --- 双圆锥 ---
-function buildCone(alphaDeg, heightC, showWire, lw) {
+function buildCone(alphaDeg, heightC, showWire) {
   disposeGroup(coneGroup);
   const H = heightC;
   const k = Math.tan(alphaDeg * Math.PI / 180);
@@ -249,22 +162,25 @@ function buildCone(alphaDeg, heightC, showWire, lw) {
   }));
   coneGroup.add(surf);
   if (showWire) {
-    const ringR = lw * 0.75;
+    const ringMat = new THREE.LineBasicMaterial({ color: 0x7d93c8, transparent: true, opacity: 0.45 });
     for (let i = 1; i <= 8; i++) {
       const yy = -H + (2 * H) * (i / 9);
       const rr = k * Math.abs(yy);
       const pts = [];
       for (let j = 0; j <= 64; j++) { const t = j / 64 * Math.PI * 2; pts.push(new THREE.Vector3(rr * Math.cos(t), yy, rr * Math.sin(t))); }
-      addGlowLine(coneGroup, pts, 0x5f9bff, ringR, { coreOpacity: 0.85, haloOpacity: 0.22 });
+      coneGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), ringMat));
     }
   }
-  // 轴线
-  addGlowLine(coneGroup, [new THREE.Vector3(0, -H - 0.6, 0), new THREE.Vector3(0, H + 0.6, 0)],
-    0x9aa3b5, lw * 0.45, { coreOpacity: 0.6, haloOpacity: 0.18 });
+  const ax = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -H - 0.5, 0), new THREE.Vector3(0, H + 0.5, 0)]),
+    new THREE.LineDashedMaterial({ color: 0x666666, dashSize: 0.2, gapSize: 0.12 })
+  );
+  ax.computeLineDistances();
+  coneGroup.add(ax);
 }
 
 // --- 截面平面 ---
-function buildPlane(basis, psize, lw) {
+function buildPlane(basis, psize) {
   disposeGroup(planeGroup);
   const s = psize / 2;
   const { eu, ev, P0 } = basis;
@@ -278,7 +194,10 @@ function buildPlane(basis, psize, lw) {
   planeGroup.add(new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
     color: 0xd64545, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false,
   })));
-  addGlowLine(planeGroup, [c1, c2, c3, c4, c1], 0xff6b6b, lw * 0.85, { coreOpacity: 0.9, haloOpacity: 0.28 });
+  planeGroup.add(new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints([c1, c2, c3, c4]),
+    new THREE.LineBasicMaterial({ color: 0xd64545, transparent: true, opacity: 0.75 })
+  ));
 }
 
 // --- 交线：母线 g(θ)=(k cosθ, 1, k sinθ)，t(θ)=h cosφ/(cosφ + k sinφ cos(θ-γ)) ---
@@ -288,7 +207,7 @@ function computeConicBranches(basis, heightC) {
   const cp = Math.cos(phi), sp = Math.sin(phi);
   const d = P0.y * cp;
   const H = heightC;
-  const N = 720;
+  const N = 1080;
   const branches = [];
   const throughApex = Math.abs(P0.y) < 1e-4;
   let cur = [], prevValid = false, prevTSign = 0;
@@ -325,12 +244,19 @@ function computeConicBranches(basis, heightC) {
   }
   return branches;
 }
-function buildCurve(branches, lw) {
+function buildCurve(branches) {
   disposeGroup(curveGroup);
+  const mat = new THREE.LineBasicMaterial({ color: 0xf5a623, transparent: true, opacity: 0.98 });
+  const dotMat = new THREE.MeshBasicMaterial({ color: 0xffc94d });
   for (const br of branches) {
     if (br.length < 2) continue;
-    // 交线：明亮橙芯 + 强光晕，主角线
-    addGlowLine(curveGroup, br, 0xffb545, lw, { coreOpacity: 1, haloOpacity: 0.42, haloScale: 2.2, radialSeg: 8 });
+    curveGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(br), mat));
+    const step = Math.max(1, Math.floor(br.length / 32));
+    for (let i = 0; i < br.length; i += step) {
+      const sph = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), dotMat);
+      sph.position.copy(br[i]);
+      curveGroup.add(sph);
+    }
   }
 }
 
@@ -398,23 +324,32 @@ function computeEquation(alphaDeg, phiDeg, hAbs) {
   }
   return eq;
 }
-function buildHelpers(eq, basis, showFoci, showAxes, lw) {
+function buildHelpers(eq, basis, showFoci, showAxes) {
   disposeGroup(helperGroup);
   if (!eq || eq.type === 'degenerate') return;
   if (showAxes && eq.axisEnds) {
     const p1 = localToWorld(eq.axisEnds[0], eq.axisEnds[1], basis);
     const p2 = localToWorld(eq.axisEnds[2], eq.axisEnds[3], basis);
-    addGlowLine(helperGroup, [p1, p2], 0x9d7bff, lw * 0.8, { coreOpacity: 0.9, haloOpacity: 0.3 });
+    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1, p2]),
+      new THREE.LineDashedMaterial({ color: 0x7c5cbf, dashSize: 0.18, gapSize: 0.1, transparent: true, opacity: 0.85 }));
+    ln.computeLineDistances();
+    helperGroup.add(ln);
     if (eq.conjEnds) {
       const q1 = localToWorld(eq.conjEnds[0], eq.conjEnds[1], basis);
       const q2 = localToWorld(eq.conjEnds[2], eq.conjEnds[3], basis);
-      addGlowLine(helperGroup, [q1, q2], 0x3ecf8e, lw * 0.7, { coreOpacity: 0.85, haloOpacity: 0.26 });
+      const l2 = new THREE.Line(new THREE.BufferGeometry().setFromPoints([q1, q2]),
+        new THREE.LineDashedMaterial({ color: 0x2e8b57, dashSize: 0.14, gapSize: 0.09, transparent: true, opacity: 0.7 }));
+      l2.computeLineDistances();
+      helperGroup.add(l2);
     }
   }
   if (showFoci && eq.foci) {
+    const focusMat = new THREE.MeshBasicMaterial({ color: 0x7c5cbf });
     for (const f of eq.foci) {
       const w = localToWorld(f[0], f[1], basis);
-      addGlowSphere(helperGroup, w, 0xa78bfa, Math.max(0.1, lw * 1.3));
+      const sph = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), focusMat);
+      sph.position.copy(w);
+      helperGroup.add(sph);
     }
   }
   if (showAxes && eq.directrices) {
@@ -422,7 +357,10 @@ function buildHelpers(eq, basis, showFoci, showAxes, lw) {
       if (!isFinite(dv)) continue;
       const len = 6;
       const a = localToWorld(-len, dv, basis), b = localToWorld(len, dv, basis);
-      addGlowLine(helperGroup, [a, b], 0x2ec27e, lw * 0.7, { coreOpacity: 0.9, haloOpacity: 0.28 });
+      const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]),
+        new THREE.LineDashedMaterial({ color: 0x2e8b57, dashSize: 0.16, gapSize: 0.1, transparent: true, opacity: 0.8 }));
+      ln.computeLineDistances();
+      helperGroup.add(ln);
     }
   }
 }
@@ -441,24 +379,23 @@ function updateConicBadge(eq) {
 }
 
 // 统一更新圆锥曲线场景（applyAll 调用；做脏检查避免每帧重建圆锥几何）
-let _dirty = { alpha: NaN, heightC: NaN, phi: NaN, gamma: NaN, hAbs: NaN, psize: NaN, lw: NaN, showWire: NaN, showCone: NaN, showPlane: NaN, showCurve: NaN, showFoci: NaN, showAxes: NaN };
+let _dirty = { alpha: NaN, heightC: NaN, phi: NaN, gamma: NaN, hAbs: NaN, psize: NaN, showWire: NaN, showCone: NaN, showPlane: NaN, showCurve: NaN, showFoci: NaN, showAxes: NaN };
 function updateConicScene(v) {
   const hAbs = v.hRatio * v.heightC;
-  const lw = v.lineWidth;
   const basis = planeBasis(v.alpha, v.phi, v.gamma, hAbs);
 
-  if (v.alpha !== _dirty.alpha || v.heightC !== _dirty.heightC || v.showWire !== _dirty.showWire || lw !== _dirty.lw) {
-    buildCone(v.alpha, v.heightC, v.showWire === 1, lw);
+  if (v.alpha !== _dirty.alpha || v.heightC !== _dirty.heightC || v.showWire !== _dirty.showWire) {
+    buildCone(v.alpha, v.heightC, v.showWire === 1);
   }
-  if (v.phi !== _dirty.phi || v.gamma !== _dirty.gamma || hAbs !== _dirty.hAbs || v.psize !== _dirty.psize || lw !== _dirty.lw) {
-    buildPlane(basis, v.psize, lw);
+  if (v.phi !== _dirty.phi || v.gamma !== _dirty.gamma || hAbs !== _dirty.hAbs || v.psize !== _dirty.psize) {
+    buildPlane(basis, v.psize);
     const branches = computeConicBranches(basis, v.heightC);
-    buildCurve(branches, lw);
+    buildCurve(branches);
   }
   const eq = computeEquation(v.alpha, v.phi, hAbs);
-  if (v.phi !== _dirty.phi || v.gamma !== _dirty.gamma || hAbs !== _dirty.hAbs || lw !== _dirty.lw ||
+  if (v.phi !== _dirty.phi || v.gamma !== _dirty.gamma || hAbs !== _dirty.hAbs ||
       v.showFoci !== _dirty.showFoci || v.showAxes !== _dirty.showAxes) {
-    buildHelpers(eq, basis, v.showFoci === 1, v.showAxes === 1, lw);
+    buildHelpers(eq, basis, v.showFoci === 1, v.showAxes === 1);
   }
   updateConicBadge(eq);
 
@@ -466,7 +403,7 @@ function updateConicScene(v) {
   planeGroup.visible = v.showPlane === 1;
   curveGroup.visible = v.showCurve === 1;
 
-  _dirty = { alpha: v.alpha, heightC: v.heightC, phi: v.phi, gamma: v.gamma, hAbs, psize: v.psize, lw,
+  _dirty = { alpha: v.alpha, heightC: v.heightC, phi: v.phi, gamma: v.gamma, hAbs, psize: v.psize,
     showWire: v.showWire, showCone: v.showCone, showPlane: v.showPlane, showCurve: v.showCurve,
     showFoci: v.showFoci, showAxes: v.showAxes };
 }
